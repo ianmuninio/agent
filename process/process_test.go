@@ -22,7 +22,7 @@ func TestProcessRunsAndSignalsStartedAndStopped(t *testing.T) {
 	var started int32
 	var done int32
 
-	p := process.NewProcess(logger.Discard, process.ProcessConfig{
+	p := process.NewProcess(logger.Discard, process.Config{
 		Script: []string{os.Args[0]},
 		Env:    []string{"TEST_MAIN=tester"},
 	})
@@ -40,7 +40,8 @@ func TestProcessRunsAndSignalsStartedAndStopped(t *testing.T) {
 	}()
 
 	// wait for the process to finish
-	if err := p.Start(); err != nil {
+	res, err := p.Execute()
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,21 +56,22 @@ func TestProcessRunsAndSignalsStartedAndStopped(t *testing.T) {
 		t.Fatalf("Expected done to be 1, got %d", doneVal)
 	}
 
-	if exitStatus := p.ExitStatus; exitStatus != "0" {
-		t.Fatalf("Expected ExitStatus of 0, got %v", exitStatus)
+	if exitCode := res.ExitCode; exitCode != 0 {
+		t.Fatalf("Expected ExitCode of 0, got %d", exitCode)
 	}
 }
 
 func TestProcessCapturesOutputLineByLine(t *testing.T) {
 	var lines = &processLineHandler{}
 
-	p := process.NewProcess(logger.Discard, process.ProcessConfig{
+	p := process.NewProcess(logger.Discard, process.Config{
 		Script:  []string{os.Args[0]},
 		Env:     []string{"TEST_MAIN=tester"},
 		Handler: lines.Handle,
 	})
 
-	if err := p.Start(); err != nil {
+	res, err := p.Execute()
+	if err != nil {
 		t.Error(err)
 	}
 
@@ -84,6 +86,10 @@ func TestProcessCapturesOutputLineByLine(t *testing.T) {
 	if !reflect.DeepEqual(expected, lines.Lines()) {
 		t.Fatalf("Unexpected lines: %v", lines)
 	}
+
+	if exitCode := res.ExitCode; exitCode != 0 {
+		t.Fatalf("Expected ExitCode of 0, got %d", exitCode)
+	}
 }
 
 func TestProcessInterrupts(t *testing.T) {
@@ -93,7 +99,7 @@ func TestProcessInterrupts(t *testing.T) {
 
 	var lines = &processLineHandler{}
 
-	p := process.NewProcess(logger.Discard, process.ProcessConfig{
+	p := process.NewProcess(logger.Discard, process.Config{
 		Script:  []string{os.Args[0]},
 		Env:     []string{"TEST_MAIN=tester-signal"},
 		Handler: lines.Handle,
@@ -112,7 +118,7 @@ func TestProcessInterrupts(t *testing.T) {
 		p.Interrupt()
 	}()
 
-	if err := p.Start(); err != nil {
+	if _, err := p.Execute(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,17 +136,18 @@ func TestProcessSetsProcessGroupID(t *testing.T) {
 		return
 	}
 
-	p := process.NewProcess(logger.Discard, process.ProcessConfig{
+	p := process.NewProcess(logger.Discard, process.Config{
 		Script: []string{os.Args[0]},
 		Env:    []string{"TEST_MAIN=tester-pgid"},
 	})
 
-	if err := p.Start(); err != nil {
+	res, err := p.Execute()
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if p.ExitStatus != "0" {
-		t.Fatalf("Expected ExitStatus to be 0, got %s", p.ExitStatus)
+	if exitCode := res.ExitCode; exitCode != 0 {
+		t.Fatalf("Expected ExitCode of 0, got %d", exitCode)
 	}
 }
 

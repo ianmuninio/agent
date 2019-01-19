@@ -14,7 +14,7 @@ import (
 	"github.com/buildkite/agent/logger"
 )
 
-type ProcessConfig struct {
+type Config struct {
 	PTY       bool
 	Timestamp bool
 	Script    []string
@@ -25,32 +25,45 @@ type ProcessConfig struct {
 }
 
 type Process struct {
-	// Outputs available after the process starts
-	Pid        int
-	ExitStatus string
-
-	conf          ProcessConfig
+	pid           int
+	timer         time.Time
+	conf          Config
 	logger        *logger.Logger
 	command       *exec.Cmd
 	mu            sync.Mutex
 	started, done chan struct{}
 }
 
-func NewProcess(l *logger.Logger, c ProcessConfig) *Process {
+type Result struct {
+	ExitCode int
+	Signal   syscall.Signal
+}
+
+func (r Result) String() string {
+	if r.Signal > 0 {
+		return fmt.Sprintf("interrupted with signal %d", r.Signal)
+	}
+	return fmt.Sprintf("exited with %d", r.ExitCode)
+}
+
+func NewProcess(l *logger.Logger, c Config) *Process {
 	return &Process{
 		logger: l,
 		conf:   c,
 	}
 }
 
-// Start executes the command and blocks until it finishes
-func (p *Process) Start() error {
+// Run executes the command and blocks until it finishes
+func (p *Process) Execute() (Result, error) {
 	if p.command != nil {
-		return fmt.Errorf("Process is already running")
+		return Result{}, fmt.Errorf("Process is already running")
 	}
 
 	// Create a command
 	p.command = exec.Command(p.conf.Script[0], p.conf.Script[1:]...)
+
+	// Track the starting time
+	p.timer = time.Now()
 
 	// Setup the process to create a process group if supported
 	// See https://github.com/kr/pty/issues/35 for context
@@ -83,11 +96,10 @@ func (p *Process) Start() error {
 	if p.conf.PTY {
 		pty, err := StartPTY(p.command)
 		if err != nil {
-			p.ExitStatus = "1"
-			return err
+			return Result{ExitCode: 1}, err
 		}
 
-		p.Pid = p.command.Process.Pid
+		p.pid = p.command.Process.Pid
 
 		// Signal waiting consumers in Started() by closing the started channel
 		close(p.started)
@@ -123,17 +135,16 @@ func (p *Process) Start() error {
 
 		err := p.command.Start()
 		if err != nil {
-			p.ExitStatus = "1"
-			return err
+			return Result{ExitCode: 1}, err
 		}
 
-		p.Pid = p.command.Process.Pid
+		p.pid = p.command.Process.Pid
 
 		// Signal waiting consumers in Started() by closing the started channel
 		close(p.started)
 	}
 
-	p.logger.Info("[Process] Process is running with PID: %d", p.Pid)
+	p.logger.Info("[Process] Process is running with PID: %d", p.pid)
 
 	if p.conf.Handler != nil {
 		// Add the scanner the waitGroup
@@ -162,21 +173,37 @@ func (p *Process) Start() error {
 	// Signal waiting consumers in Done() by closing the done channel
 	close(p.done)
 
-	// Find the exit status of the script
-	p.ExitStatus = p.getExitStatus(waitResult)
+	var res Result
 
-	p.logger.Info("Process with PID: %d finished with Exit Status: %s", p.Pid, p.ExitStatus)
+	// Get results from call to wait()
+	if waitResult != nil {
+		if err, ok := waitResult.(*exec.ExitError); ok {
+			if s, ok := err.Sys().(syscall.WaitStatus); ok {
+				res.ExitCode = s.ExitStatus()
+				res.Signal = s.Signal()
+			} else {
+				return Result{ExitCode: 1}, errors.New("Unimplemented for system where exec.ExitError.Sys() is not syscall.WaitStatus")
+			}
+		} else {
+			return Result{ExitCode: 1}, fmt.Errorf("Unexpected error type %T", waitResult)
+		}
+	}
+
+	// bash uses 128 + signal code when interrupted, we'll copy that
+	if res.Signal > 0 {
+		res.ExitCode = 128 + int(res.Signal)
+	}
+
+	p.logger.Info("Process %d finished in %v: %s", p.pid, time.Now().Sub(p.timer), res.String())
 
 	// Sometimes (in docker containers) io.Copy never seems to finish. This is a mega
 	// hack around it. If it doesn't finish after 1 second, just continue.
 	p.logger.Debug("[Process] Waiting for routines to finish")
-	err := timeoutWait(&waitGroup)
-	if err != nil {
+	if err := timeoutWait(&waitGroup); err != nil {
 		p.logger.Debug("[Process] Timed out waiting for wait group: (%T: %v)", err, err)
 	}
 
-	// No error occurred so we can return nil
-	return nil
+	return res, nil
 }
 
 // Done returns a channel that is closed when the process finishes
@@ -215,7 +242,7 @@ func (p *Process) Interrupt() error {
 
 	// interrupt the process (ctrl-c or SIGINT)
 	if err := InterruptProcessGroup(p.command.Process, p.logger); err != nil {
-		p.logger.Error("[Process] Failed to interrupt process %d: %v", p.Pid, err)
+		p.logger.Error("[Process] Failed to interrupt process %d: %v", p.pid, err)
 
 		// Fallback to terminating if we get an error
 		if termErr := TerminateProcessGroup(p.command.Process, p.logger); termErr != nil {
@@ -237,28 +264,6 @@ func (p *Process) Terminate() error {
 	}
 
 	return TerminateProcessGroup(p.command.Process, p.logger)
-}
-
-// https://github.com/hnakamur/commango/blob/fe42b1cf82bf536ce7e24dceaef6656002e03743/os/executil/executil.go#L29
-// TODO: Can this be better?
-func (p *Process) getExitStatus(waitResult error) string {
-	exitStatus := -1
-
-	if waitResult != nil {
-		if err, ok := waitResult.(*exec.ExitError); ok {
-			if s, ok := err.Sys().(syscall.WaitStatus); ok {
-				exitStatus = s.ExitStatus()
-			} else {
-				p.logger.Error("[Process] Unimplemented for system where exec.ExitError.Sys() is not syscall.WaitStatus.")
-			}
-		} else {
-			p.logger.Error("[Process] Unexpected error type in getExitStatus: %#v", waitResult)
-		}
-	} else {
-		exitStatus = 0
-	}
-
-	return fmt.Sprintf("%d", exitStatus)
 }
 
 func timeoutWait(waitGroup *sync.WaitGroup) error {

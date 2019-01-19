@@ -4,16 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/buildkite/agent/api"
 	"github.com/buildkite/agent/logger"
 	"github.com/buildkite/agent/metrics"
 	"github.com/buildkite/agent/retry"
-	"github.com/buildkite/agent/signalwatcher"
 	"github.com/buildkite/agent/system"
 	"github.com/denisbrodbeck/machineid"
 )
@@ -36,12 +37,12 @@ type AgentPoolConfig struct {
 }
 
 type AgentPool struct {
-	conf                  AgentPoolConfig
-	logger                *logger.Logger
-	apiClient             *api.Client
-	metricsCollector      *metrics.Collector
-	interruptCount        int
-	signalLock            sync.Mutex
+	conf             AgentPoolConfig
+	logger           *logger.Logger
+	apiClient        *api.Client
+	metricsCollector *metrics.Collector
+	interruptCount   int
+	signalLock       sync.Mutex
 }
 
 func NewAgentPool(l *logger.Logger, m *metrics.Collector, c AgentPoolConfig) *AgentPool {
@@ -71,7 +72,7 @@ func (r *AgentPool) Start() error {
 		go func() {
 			defer wg.Done()
 			if err := r.startWorker(); err != nil {
-				errs<-err
+				errs <- err
 			}
 		}()
 	}
@@ -82,7 +83,6 @@ func (r *AgentPool) Start() error {
 	}()
 
 	r.logger.Info("Started %d Agent(s)", r.conf.Spawn)
-	r.logger.Info("You can press Ctrl-C to stop the agents")
 
 	return <-errs
 }
@@ -125,27 +125,37 @@ func (r *AgentPool) startWorker() error {
 	}
 
 	// Start a signalwatcher so we can monitor signals and handle shutdowns
-	signalwatcher.Watch(func(sig signalwatcher.Signal) {
-		r.signalLock.Lock()
-		defer r.signalLock.Unlock()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt,
+		syscall.SIGHUP,
+		syscall.SIGTERM,
+		syscall.SIGINT,
+		syscall.SIGQUIT)
+	defer signal.Stop(signals)
 
-		if sig == signalwatcher.QUIT {
-			l.Debug("Received signal `%s`", sig.String())
-			worker.Stop(false)
-		} else if sig == signalwatcher.TERM || sig == signalwatcher.INT {
-			l.Debug("Received signal `%s`", sig.String())
-			if r.interruptCount == 0 {
-				r.interruptCount++
-				l.Info("Received CTRL-C, send again to forcefully kill the agent")
-				worker.Stop(true)
-			} else {
-				l.Info("Forcefully stopping running jobs and stopping the agent")
+	go func() {
+		var interruptCount int
+
+		for sig := range signals {
+			l.Debug("Received signal `%v`", sig)
+
+			switch sig {
+			case syscall.SIGQUIT:
 				worker.Stop(false)
+			case syscall.SIGTERM, syscall.SIGINT:
+				l.Info("Waiting for jobs to finish, send signal again to forcefully stop the running job")
+				if interruptCount == 0 {
+					interruptCount++
+					worker.Stop(true)
+				} else {
+					l.Info("Forcefully stopping running jobs and stopping the agent")
+					worker.Stop(false)
+				}
+			default:
+				l.Debug("Ignoring signal `%v`", sig)
 			}
-		} else {
-			l.Debug("Ignoring signal `%s`", sig.String())
 		}
-	})
+	}()
 
 	// Starts the agent worker.
 	if err := worker.Start(); err != nil {

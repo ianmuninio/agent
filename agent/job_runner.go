@@ -19,6 +19,11 @@ import (
 	"github.com/buildkite/shellwords"
 )
 
+const (
+	CancelReasonAgentStopped  = `agent_stopped`
+	CancelReasonUserInitiated = `user_initiated`
+)
+
 type JobRunnerConfig struct {
 	// The endpoint that should be used when communicating with the API
 	Endpoint string
@@ -71,6 +76,9 @@ type JobRunner struct {
 	// If the job is being cancelled
 	cancelled bool
 
+	// Why the job was cancelled
+	cancelledReason string
+
 	// Used to wait on various routines that we spin up
 	routineWaitGroup sync.WaitGroup
 
@@ -84,10 +92,10 @@ type JobRunner struct {
 // Initializes the job runner
 func NewJobRunner(l *logger.Logger, scope *metrics.Scope, ag *api.Agent, j *api.Job, conf JobRunnerConfig) (*JobRunner, error) {
 	runner := &JobRunner{
-		agent: ag,
-		job: j,
-		logger: l,
-		conf: conf,
+		agent:   ag,
+		job:     j,
+		logger:  l,
+		conf:    conf,
 		metrics: scope,
 	}
 
@@ -96,7 +104,7 @@ func NewJobRunner(l *logger.Logger, scope *metrics.Scope, ag *api.Agent, j *api.
 	// Our own APIClient using the endpoint and the agents access token
 	runner.apiClient = NewAPIClient(l, APIClientConfig{
 		Endpoint: runner.conf.Endpoint,
-		Token: ag.AccessToken,
+		Token:    ag.AccessToken,
 	})
 
 	// A proxy for the agent API that is expose to the bootstrap
@@ -108,7 +116,7 @@ func NewJobRunner(l *logger.Logger, scope *metrics.Scope, ag *api.Agent, j *api.
 	// The log streamer that will take the output chunks, and send them to
 	// the Buildkite Agent API
 	runner.logStreamer = NewLogStreamer(l, runner.onUploadChunk, LogStreamerConfig{
-		Concurrency: 3,
+		Concurrency:       3,
 		MaxChunkSizeBytes: j.ChunksMaxSizeBytes,
 	})
 
@@ -156,7 +164,7 @@ func NewJobRunner(l *logger.Logger, scope *metrics.Scope, ag *api.Agent, j *api.
 	}
 
 	// The process that will run the bootstrap script
-	runner.process = process.NewProcess(l, process.ProcessConfig{
+	runner.process = process.NewProcess(l, process.Config{
 		Script:  cmd,
 		Env:     env,
 		PTY:     conf.AgentConfiguration.RunInPty,
@@ -195,8 +203,9 @@ func (r *JobRunner) Run() error {
 		return err
 	}
 
-	// Start the process. This will block until it finishes.
-	if err := r.process.Start(); err != nil {
+	// Execute the process. This will block until it finishes.
+	result, err := r.process.Execute()
+	if err != nil {
 		// Send the error as output
 		r.logStreamer.Process(fmt.Sprintf("%s", err))
 	} else {
@@ -216,7 +225,7 @@ func (r *JobRunner) Run() error {
 	r.logStreamer.Stop()
 
 	// Warn about failed chunks
-	if count := r.logStreamer.FailedChunks(); count > 0{
+	if count := r.logStreamer.FailedChunks(); count > 0 {
 		r.logger.Warn("%d chunks failed to upload for this job", count)
 	}
 
@@ -241,11 +250,11 @@ func (r *JobRunner) Run() error {
 	}
 
 	jobMetrics := r.metrics.With(metrics.Tags{
-		"exit_code": r.process.ExitStatus,
+		"exit_code": fmt.Sprintf("%d", result.ExitCode),
 	})
 
 	// Write some metrics about the job run
-	if r.process.ExitStatus == "0" {
+	if result.ExitCode == 0 {
 		jobMetrics.Timing(`jobs.duration.success`, finishedAt.Sub(startedAt))
 		jobMetrics.Count(`jobs.success`, 1)
 	} else {
@@ -257,20 +266,22 @@ func (r *JobRunner) Run() error {
 	//
 	// Once we tell the API we're finished it might assign us new work, so make
 	// sure everything else is done first.
-	r.finishJob(finishedAt, r.process.ExitStatus, r.logStreamer.FailedChunks())
+	r.finishJob(finishedAt, result, r.cancelledReason, r.logStreamer.FailedChunks())
 
 	r.logger.Info("Finished job %s", r.job.ID)
 
 	return nil
 }
 
-func (r *JobRunner) Cancel() error {
+func (r *JobRunner) Cancel(reason string) error {
 	r.cancelLock.Lock()
 	defer r.cancelLock.Unlock()
 
 	if r.cancelled {
 		return nil
 	}
+
+	r.cancelledReason = reason
 
 	if r.process == nil {
 		r.logger.Error("No process to kill")
@@ -445,9 +456,11 @@ func (r *JobRunner) startJob(startedAt time.Time) error {
 
 // Finishes the job in the Buildkite Agent API. This call will keep on retrying
 // forever until it finally gets a successfull response from the API.
-func (r *JobRunner) finishJob(finishedAt time.Time, exitStatus string, failedChunkCount int) error {
+func (r *JobRunner) finishJob(finishedAt time.Time, res process.Result, cancelReason string, failedChunkCount int) error {
 	r.job.FinishedAt = finishedAt.UTC().Format(time.RFC3339Nano)
-	r.job.ExitStatus = exitStatus
+	r.job.ExitStatus = fmt.Sprintf("%d", res.ExitCode)
+	r.job.Signal = fmt.Sprintf("%d", int(res.Signal))
+	r.job.CancelReason = cancelReason
 	r.job.ChunksFailedCount = failedChunkCount
 
 	return retry.Do(func(s *retry.Stats) error {
@@ -523,7 +536,7 @@ func (r *JobRunner) onProcessStartCallback() {
 				// try again soon anyway
 				r.logger.Warn("Problem with getting job state %s (%s)", r.job.ID, err)
 			} else if jobState.State == "canceling" || jobState.State == "canceled" {
-				r.Cancel()
+				r.Cancel(CancelReasonUserInitiated)
 			}
 
 			// Sleep for a bit, or until the job is finished

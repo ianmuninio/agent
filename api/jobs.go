@@ -18,6 +18,8 @@ type Job struct {
 	Env                map[string]string `json:"env,omitempty"`
 	ChunksMaxSizeBytes int               `json:"chunks_max_size_bytes,omitempty"`
 	ExitStatus         string            `json:"exit_status,omitempty"`
+	Signal             string            `json:"signal,omitempty"`
+	CancelReason       string            `json:"cancel_reason,omitempty"`
 	StartedAt          string            `json:"started_at,omitempty"`
 	FinishedAt         string            `json:"finished_at,omitempty"`
 	ChunksFailedCount  int               `json:"chunks_failed_count,omitempty"`
@@ -33,6 +35,8 @@ type jobStartRequest struct {
 
 type jobFinishRequest struct {
 	ExitStatus        string `json:"exit_status,omitempty"`
+	Signal            string `json:"signal,omitempty"`
+	CancelReason      string `json:"cancel_reason,omitempty"`
 	FinishedAt        string `json:"finished_at,omitempty"`
 	ChunksFailedCount int    `json:"chunks_failed_count"`
 }
@@ -96,6 +100,8 @@ func (js *JobsService) Finish(job *Job) (*Response, error) {
 	req, err := js.client.NewRequest("PUT", u, &jobFinishRequest{
 		FinishedAt:        job.FinishedAt,
 		ExitStatus:        job.ExitStatus,
+		Signal:            job.Signal,
+		CancelReason:      job.CancelReason,
 		ChunksFailedCount: job.ChunksFailedCount,
 	})
 	if err != nil {
