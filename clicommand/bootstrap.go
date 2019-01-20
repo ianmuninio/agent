@@ -63,6 +63,7 @@ type BootstrapConfig struct {
 	GitCleanFlags                string   `cli:"git-clean-flags"`
 	BinPath                      string   `cli:"bin-path" normalize:"filepath"`
 	BuildPath                    string   `cli:"build-path" normalize:"filepath"`
+	RepositoriesPath             string   `cli:"repositories-path" normalize:"filepath"`
 	HooksPath                    string   `cli:"hooks-path" normalize:"filepath"`
 	PluginsPath                  string   `cli:"plugins-path" normalize:"filepath"`
 	CommandEval                  bool     `cli:"command-eval"`
@@ -200,6 +201,12 @@ var BootstrapCommand = cli.Command{
 			EnvVar: "BUILDKITE_BUILD_PATH",
 		},
 		cli.StringFlag{
+			Name:   "repositories-path",
+			Value:  "",
+			Usage:  "Directory where repositories will be stored",
+			EnvVar: "BUILDKITE_REPOSITORIES_PATH",
+		},
+		cli.StringFlag{
 			Name:   "hooks-path",
 			Value:  "",
 			Usage:  "Directory where the hook scripts are found",
@@ -319,6 +326,7 @@ var BootstrapCommand = cli.Command{
 				ArtifactUploadDestination:    cfg.ArtifactUploadDestination,
 				CleanCheckout:                cfg.CleanCheckout,
 				BuildPath:                    cfg.BuildPath,
+				RepositoriesPath:             cfg.RepositoriesPath,
 				BinPath:                      cfg.BinPath,
 				HooksPath:                    cfg.HooksPath,
 				PluginsPath:                  cfg.PluginsPath,

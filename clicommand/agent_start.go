@@ -48,6 +48,7 @@ type AgentStartConfig struct {
 	BootstrapScript           string   `cli:"bootstrap-script" normalize:"commandpath"`
 	CancelGracePeriod         int      `cli:"cancel-grace-period"`
 	BuildPath                 string   `cli:"build-path" normalize:"filepath" validate:"required"`
+	RepositoriesPath          string   `cli:"repositories-path" normalize:"filepath"`
 	HooksPath                 string   `cli:"hooks-path" normalize:"filepath"`
 	PluginsPath               string   `cli:"plugins-path" normalize:"filepath"`
 	Shell                     string   `cli:"shell"`
@@ -231,6 +232,12 @@ var AgentStartCommand = cli.Command{
 			Value:  "",
 			Usage:  "Path to where the builds will run from",
 			EnvVar: "BUILDKITE_BUILD_PATH",
+		},
+		cli.StringFlag{
+			Name:   "repositories-path",
+			Value:  "",
+			Usage:  "Path where source repositories will be stored",
+			EnvVar: "BUILDKITE_REPOSITORIES_PATH",
 		},
 		cli.StringFlag{
 			Name:   "hooks-path",
@@ -430,13 +437,14 @@ var AgentStartCommand = cli.Command{
 			DisableColors:         cfg.NoColor,
 			Spawn:                 cfg.Spawn,
 			APIClientConfig: agent.APIClientConfig{
-				Token:                 cfg.Token,
-				Endpoint:              cfg.Endpoint,
-				DisableHTTP2:          cfg.NoHTTP2,
+				Token:        cfg.Token,
+				Endpoint:     cfg.Endpoint,
+				DisableHTTP2: cfg.NoHTTP2,
 			},
 			AgentConfiguration: &agent.AgentConfiguration{
 				BootstrapScript:           cfg.BootstrapScript,
 				BuildPath:                 cfg.BuildPath,
+				RepositoriesPath:          cfg.RepositoriesPath,
 				HooksPath:                 cfg.HooksPath,
 				PluginsPath:               cfg.PluginsPath,
 				GitCloneFlags:             cfg.GitCloneFlags,

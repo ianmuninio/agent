@@ -336,6 +336,11 @@ func dirForAgentName(agentName string) string {
 	return badCharsPattern.ReplaceAllString(agentName, "-")
 }
 
+func dirForRepository(repository string) string {
+	badCharsPattern := regexp.MustCompile("[[:^alnum:]]")
+	return badCharsPattern.ReplaceAllString(repository, "-")
+}
+
 // Given a repository, it will add the host to the set of SSH known_hosts on the machine
 func addRepositoryHostToSSHKnownHosts(sh *shell.Shell, repository string) {
 	if fileExists(repository) {
@@ -390,7 +395,7 @@ func (b *Bootstrap) setUp() error {
 			return fmt.Errorf("Must set either a BUILDKITE_BUILD_PATH or a BUILDKITE_BUILD_CHECKOUT_PATH")
 		}
 		b.shell.Env.Set("BUILDKITE_BUILD_CHECKOUT_PATH",
-			filepath.Join(b.BuildPath, dirForAgentName(b.AgentName), b.OrganizationSlug, b.PipelineSlug))
+			filepath.Join(b.BuildPath, b.JobID))
 	}
 
 	// The job runner sets BUILDKITE_IGNORED_ENV with any keys that were ignored
@@ -788,6 +793,19 @@ func (b *Bootstrap) createCheckoutDir() error {
 	return nil
 }
 
+func (b *Bootstrap) createRepositoryDir() error {
+	repositoryPath, _ := b.shell.Env.Get("BUILDKITE_BUILD_REPOSITORY_PATH")
+
+	if !fileExists(repositoryPath) {
+		b.shell.Commentf("Creating \"%s\"", repositoryPath)
+		if err := os.MkdirAll(repositoryPath, 0777); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // CheckoutPhase creates the build directory and makes sure we're running the
 // build at the right commit.
 func (b *Bootstrap) CheckoutPhase() error {
@@ -797,6 +815,16 @@ func (b *Bootstrap) CheckoutPhase() error {
 
 	if err := b.executePluginHook("pre-checkout", b.pluginCheckouts); err != nil {
 		return err
+	}
+
+	// Set a BUILDKITE_BUILD_REPOSITORY_PATH unless one exists already. We do this here
+	// so that pre-checkout hooks have the chance to modify BUILDKITE_REPO
+	if _, exists := b.shell.Env.Get("BUILDKITE_BUILD_REPOSITORY_PATH"); !exists {
+		if b.RepositoriesPath == "" {
+			return fmt.Errorf("Must set either a BUILDKITE_REPOSITORIES_PATH or a BUILDKITE_BUILD_REPOSITORY_PATH")
+		}
+		repo, _ := b.shell.Env.Get("BUILDKITE_REPO")
+		b.shell.Env.Set("BUILDKITE_BUILD_REPOSITORY_PATH", filepath.Join(b.RepositoriesPath, dirForRepository(repo)))
 	}
 
 	// Remove the checkout directory if BUILDKITE_CLEAN_CHECKOUT is present
@@ -811,6 +839,11 @@ func (b *Bootstrap) CheckoutPhase() error {
 
 	// Make sure the build directory exists
 	if err := b.createCheckoutDir(); err != nil {
+		return err
+	}
+
+	// Make sure the repository directory exists
+	if err := b.createRepositoryDir(); err != nil {
 		return err
 	}
 
