@@ -19,11 +19,6 @@ import (
 	"github.com/buildkite/shellwords"
 )
 
-const (
-	CancelReasonAgentStopped  = `agent_stopped`
-	CancelReasonUserInitiated = `user_initiated`
-)
-
 type JobRunnerConfig struct {
 	// The endpoint that should be used when communicating with the API
 	Endpoint string
@@ -76,8 +71,8 @@ type JobRunner struct {
 	// If the job is being cancelled
 	cancelled bool
 
-	// Why the job was cancelled
-	cancelledReason string
+	// If the agent is being stopped
+	stopped bool
 
 	// Used to wait on various routines that we spin up
 	routineWaitGroup sync.WaitGroup
@@ -266,14 +261,21 @@ func (r *JobRunner) Run() error {
 	//
 	// Once we tell the API we're finished it might assign us new work, so make
 	// sure everything else is done first.
-	r.finishJob(finishedAt, result, r.cancelledReason, r.logStreamer.FailedChunks())
+	r.finishJob(finishedAt, result, r.logStreamer.FailedChunks())
 
 	r.logger.Info("Finished job %s", r.job.ID)
 
 	return nil
 }
 
-func (r *JobRunner) Cancel(reason string) error {
+func (r *JobRunner) CancelAndStop() error {
+	r.cancelLock.Lock()
+	r.stopped = true
+	r.cancelLock.Unlock()
+	return r.Cancel()
+}
+
+func (r *JobRunner) Cancel() error {
 	r.cancelLock.Lock()
 	defer r.cancelLock.Unlock()
 
@@ -281,14 +283,17 @@ func (r *JobRunner) Cancel(reason string) error {
 		return nil
 	}
 
-	r.cancelledReason = reason
-
 	if r.process == nil {
 		r.logger.Error("No process to kill")
 		return nil
 	}
 
-	r.logger.Info("Canceling job %s with a grace period of %ds (reason: %s)",
+	reason := ""
+	if r.stopped {
+		reason = " (agent stopping)"
+	}
+
+	r.logger.Info("Canceling job %s with a grace period of %ds%s",
 		r.job.ID, r.conf.AgentConfiguration.CancelGracePeriod, reason)
 
 	// First we interrupt the process (ctrl-c or SIGINT)
@@ -319,7 +324,7 @@ func (r *JobRunner) createEnvironment() ([]string, error) {
 	// Create a clone of our jobs environment. We'll then set the
 	// environment variables provided by the agent, which will override any
 	// sent by Buildkite. The variables below should always take
-	// precedence.
+	// precedence
 	env := make(map[string]string)
 	for key, value := range r.job.Env {
 		env[key] = value
@@ -456,12 +461,20 @@ func (r *JobRunner) startJob(startedAt time.Time) error {
 
 // Finishes the job in the Buildkite Agent API. This call will keep on retrying
 // forever until it finally gets a successfull response from the API.
-func (r *JobRunner) finishJob(finishedAt time.Time, res process.Result, cancelReason string, failedChunkCount int) error {
+func (r *JobRunner) finishJob(finishedAt time.Time, res process.Result, failedChunkCount int) error {
 	r.job.FinishedAt = finishedAt.UTC().Format(time.RFC3339Nano)
-	r.job.ExitStatus = fmt.Sprintf("%d", res.ExitCode)
-	r.job.Signal = fmt.Sprintf("%d", int(res.Signal))
-	r.job.CancelReason = cancelReason
+	r.job.ExitStatus = fmt.Sprintf("%d", res.ExitCodeWithSignal())
+	r.job.Signal = res.SignalString()
 	r.job.ChunksFailedCount = failedChunkCount
+
+	// If the agent has been stopped, send a signal reason of `agent` to distinguish between
+	// user-generated cancels and those due to the agent getting an operating system signal
+	if r.stopped {
+		r.job.SignalReason = `agent`
+	}
+
+	r.logger.Debug("[JobRunner] Finishing job with exit_status=%s, signal=%s and signal_reason=%s",
+		r.job.ExitStatus, r.job.Signal, r.job.SignalReason)
 
 	return retry.Do(func(s *retry.Stats) error {
 		response, err := r.apiClient.Jobs.Finish(r.job)
@@ -536,7 +549,7 @@ func (r *JobRunner) onProcessStartCallback() {
 				// try again soon anyway
 				r.logger.Warn("Problem with getting job state %s (%s)", r.job.ID, err)
 			} else if jobState.State == "canceling" || jobState.State == "canceled" {
-				r.Cancel(CancelReasonUserInitiated)
+				r.Cancel()
 			}
 
 			// Sleep for a bit, or until the job is finished

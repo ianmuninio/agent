@@ -359,9 +359,6 @@ var BootstrapCommand = cli.Command{
 			// Track the state and signal used
 			cancelled = true
 			received = sig
-
-			// Remove our signal handler so subsequent signals kill
-			signal.Stop(signals)
 		}()
 
 		// Run the bootstrap and get the exit code
@@ -377,6 +374,9 @@ var BootstrapCommand = cli.Command{
 			if err != nil {
 				l.Error("Failed to find current process: %v", err)
 			}
+
+			// Remove our signal handler so subsequent signals kill
+			signal.Stop(signals)
 
 			l.Debug("Terminating bootstrap after cancellation with %v", received)
 			err = p.Signal(received)

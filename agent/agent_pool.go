@@ -143,8 +143,8 @@ func (r *AgentPool) startWorker() error {
 			case syscall.SIGQUIT:
 				worker.Stop(false)
 			case syscall.SIGTERM, syscall.SIGINT:
-				l.Info("Waiting for jobs to finish, send signal again to forcefully stop the running job")
 				if interruptCount == 0 {
+					l.Info("Waiting for jobs to finish, send signal again to forcefully stop the running job")
 					interruptCount++
 					worker.Stop(true)
 				} else {

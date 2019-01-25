@@ -34,18 +34,6 @@ type Process struct {
 	started, done chan struct{}
 }
 
-type Result struct {
-	ExitCode int
-	Signal   syscall.Signal
-}
-
-func (r Result) String() string {
-	if r.Signal > 0 {
-		return fmt.Sprintf("interrupted with signal %d", r.Signal)
-	}
-	return fmt.Sprintf("exited with %d", r.ExitCode)
-}
-
 func NewProcess(l *logger.Logger, c Config) *Process {
 	return &Process{
 		logger: l,
@@ -264,6 +252,32 @@ func (p *Process) Terminate() error {
 	}
 
 	return TerminateProcessGroup(p.command.Process, p.logger)
+}
+
+type Result struct {
+	ExitCode int
+	Signal   syscall.Signal
+}
+
+func (r Result) String() string {
+	if r.Signal > 0 {
+		return fmt.Sprintf("Killed by signal %s", SignalString(r.Signal))
+	}
+	return fmt.Sprintf("Exited with status %d", r.ExitCode)
+}
+
+func (r Result) SignalString() string {
+	return SignalString(r.Signal)
+}
+
+// ExitCodeWithSignal returns the ExitCode, or if there is a Signal and a non-zero exit code
+// then the return 128 + the signal code. This is weird, but it's what bash does which means
+// it must be correct.
+func (r Result) ExitCodeWithSignal() int {
+	if r.Signal != 0 && r.ExitCode == 0 {
+		return 128 + int(r.Signal)
+	}
+	return r.ExitCode
 }
 
 func timeoutWait(waitGroup *sync.WaitGroup) error {
